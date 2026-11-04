@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src data:">
+<title>Verificación de certificados (prueba)</title>
+<style>
+  :root { --tinta:#1b2733; --suave:#5d6b78; --fondo:#f2f5f8; --tarjeta:#fff; --azul:#0a8fd6; --ok:#12724a; --okf:#e4f5ec; --mal:#a3261f; --malf:#fbe9e7; --gris:#55616d; --grisf:#e9edf1; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--fondo); color:var(--tinta); font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif; }
+  .aviso { background:#fff4cf; color:#5c4700; text-align:center; padding:10px 16px; font-weight:600; font-size:14px; }
+  main { max-width:720px; margin:24px auto; padding:0 16px; }
+  .tarjeta { background:var(--tarjeta); border-radius:14px; box-shadow:0 2px 14px rgba(20,40,60,.1); overflow:hidden; }
+  header { background:var(--azul); color:#fff; padding:18px 22px; font-weight:700; font-size:18px; }
+  .estado { padding:18px 22px; font-weight:700; font-size:20px; }
+  .ok { background:var(--okf); color:var(--ok); } .mal { background:var(--malf); color:var(--mal); } .neutro { background:var(--grisf); color:var(--gris); }
+  dl { margin:0; padding:6px 22px 20px; }
+  dt { color:var(--suave); font-size:13px; margin-top:14px; }
+  dd { margin:2px 0 0; font-weight:600; overflow-wrap:anywhere; }
+  figure { margin:0; padding:0 22px 8px; position:relative; }
+  figure img { width:100%; height:auto; display:block; border:1px solid #d8dfe6; border-radius:6px; }
+  figcaption { color:var(--suave); font-size:13px; margin-bottom:8px; }
+  .sello { position:absolute; left:22px; right:22px; top:50%; text-align:center; color:var(--mal); font-size:clamp(28px,9vw,64px); font-weight:800; letter-spacing:.08em; transform:rotate(-14deg); pointer-events:none; }
+  p.nota { padding:0 22px 20px; margin:12px 0 0; color:var(--suave); font-size:14px; }
+</style>
+</head>
+<body>
+<div class="aviso">PÁGINA DE PRUEBA · No válida para verificar certificados reales</div>
+<main>
+  <div class="tarjeta">
+    <header>Verificación de certificado</header>
+    <div id="estado" class="estado neutro" role="status">Consultando…</div>
+    <dl id="datos" hidden>
+      <dt>Alumno</dt><dd id="nombre"></dd>
+      <dt>Programa</dt><dd id="programa"></dd>
+      <dt>Certificado</dt><dd id="tipo"></dd>
+      <dt>Fecha de emisión</dt><dd id="fecha"></dd>
+      <dt>Código</dt><dd id="codigo"></dd>
+    </dl>
+    <figure id="vista" hidden><figcaption>Copia de verificación</figcaption><img id="imagen" alt="Copia de verificación del certificado"><div id="sello" class="sello" hidden>ANULADO</div></figure>
+    <p class="nota" id="nota">Compara estos datos con los del certificado. Si no coinciden, el documento pudo ser alterado.</p>
+  </div>
+</main>
+<script>
+  const poner = (id, txt) => { document.getElementById(id).textContent = txt; };
+  const noEncontrado = () => resultado("mal", "✕ Certificado no registrado", "Este código no corresponde a ningún certificado registrado.");
+  const b64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+  function resultado(clase, texto, nota) {
+    const e = document.getElementById("estado");
+    e.className = "estado " + clase; e.textContent = texto;
+    if (nota) poner("nota", nota);
+  }
+  async function claves(id) {
+    const t = new TextEncoder();
+    const base = await crypto.subtle.importKey("raw", t.encode(id), "PBKDF2", false, ["deriveBits"]);
+    const bits = new Uint8Array(await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt: t.encode("gerens-qr-v1"), iterations: 100000 }, base, 640));
+    return {
+      cifrado: await crypto.subtle.importKey("raw", bits.slice(0, 32), "AES-CBC", false, ["decrypt"]),
+      firma: await crypto.subtle.importKey("raw", bits.slice(32, 64), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]),
+      archivo: [...bits.slice(64, 80)].map(b => b.toString(16).padStart(2, "0")).join("")
+    };
+  }
+  (async () => {
+    const id = new URLSearchParams(location.search).get("id") || "";
+    if (!/^[A-Z0-9]{10,12}$/.test(id)) { noEncontrado(); return; }
+    try {
+      const k = await claves(id);
+      const r = await fetch("r/" + k.archivo + ".json", { cache: "no-store" });
+      if (r.status === 404) { noEncontrado(); return; }
+      if (!r.ok) throw new Error(String(r.status));
+      const c = await r.json();
+      const iv = b64(c.iv), ct = b64(c.ct), junto = new Uint8Array(iv.length + ct.length);
+      junto.set(iv); junto.set(ct, iv.length);
+      if (!await crypto.subtle.verify("HMAC", k.firma, b64(c.mac), junto)) { noEncontrado(); return; }
+      const d = JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({ name: "AES-CBC", iv }, k.cifrado, ct)));
+      poner("nombre", d.nombre); poner("programa", d.programa); poner("tipo", d.tipo); poner("fecha", d.fecha); poner("codigo", d.codigo);
+      document.getElementById("datos").hidden = false;
+      if (d.imagen) {
+        document.getElementById("imagen").src = "data:image/jpeg;base64," + d.imagen;
+        document.getElementById("vista").hidden = false;
+      }
+      if (d.estado === "valido") resultado("ok", "✓ Certificado válido");
+      else {
+        resultado("mal", "⚠ Certificado anulado", "Este certificado fue anulado y ya no tiene validez.");
+        document.getElementById("sello").hidden = false;
+      }
+    } catch (e) {
+      resultado("neutro", "No se pudo consultar", "Revisa tu conexión e inténtalo de nuevo.");
+    }
+  })();
+</script>
+</body>
+</html>
